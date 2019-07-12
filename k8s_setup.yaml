@@ -1,0 +1,64 @@
+---
+- hosts: all
+  become: yes
+  #remote_user: cloud_user
+  tasks:
+    - command: "setenforce 0"
+    - command: "sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux"
+    - command: "modprobe br_netfilter"
+    - command: "echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables"
+    - command: "swapoff -a"
+    - yum: name={{ item }} state=present
+      with_items:
+      - yum-utils
+      - device-mapper-persistent-data
+      - lvm2
+    - command: "yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo"
+    - yum: name=docker-ce state=present
+    - command: "sed -i '/^ExecStart/ s/$/ --exec-opt native.cgroupdriver=systemd/' /usr/lib/systemd/system/docker.service"
+    - shell: systemctl daemon-reload
+    - service: name=docker state=started enabled=yes
+    - name: add k8s repo
+      copy:
+         src: ./kubernetes.repo
+         dest: /etc/yum.repos.d/kubernetes.repo
+    - yum: name={{ item }} state=present
+      with_items:
+      - kubelet
+      - kubeadm
+      - kubectl
+    - service: name=kubelet enabled=yes
+- hosts: master
+  become: yes
+  #remote_user: cloud_user
+  #become_user: cloud_user
+  tasks:
+    - shell: "kubeadm init --pod-network-cidr=10.244.0.0/16"
+      ignore_errors: true
+    - shell: "kubeadm token create --print-join-command > /tmp/k8s_join_token.sh"
+    - fetch:
+         src: /tmp/k8s_join_token.sh
+         dest: ./join_command.sh
+- hosts: master
+  become: yes
+#  remote_user: cloud_user
+#  become_user: cloud_user
+  tasks:
+    - shell: "mkdir -p $HOME/.kube"
+    - shell: "cp -i /etc/kubernetes/admin.conf $HOME/.kube/config"
+      become: yes
+#      become_user: cloud_user
+    - shell: "chown $(id -u):$(id -g) $HOME/.kube/config"
+      become: yes
+    - command: "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+      become: yes
+- hosts: worker
+  become: yes
+  #remote_user: cloud_user
+  tasks:
+    - name: copy join command
+      copy:
+         src: ./join_command.sh/master1/tmp/k8s_join_token.sh
+         dest: /tmp/k8s_join_token.sh
+         mode: 0777
+    - shell: "sh /tmp/k8s_join_token.sh"
